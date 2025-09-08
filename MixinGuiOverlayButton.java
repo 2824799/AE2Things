@@ -43,36 +43,26 @@ import codechicken.nei.recipe.IRecipeHandler;
 @Mixin(GuiOverlayButton.class)
 public abstract class MixinGuiOverlayButton {
 
-    // 注意：不要 shadow handler / recipeIndex —— 新版类已经移除它们，会导致 mixin 失败。
-    // 保留 firstGui shadow（该字段在旧/新版都存在）。
+    // 只 shadow 在旧/新版都存在的字段（firstGui）
     @Shadow(remap = false)
     @Final
     public GuiContainer firstGui;
 
-    // ---------- 运行时兼容封装 ----------
-    private static class HandlerEntry {
-
-        final IRecipeHandler handler;
-        final int index;
-        final Object handlerRef; // 若需要可访问原 handlerRef object
-
-        HandlerEntry(IRecipeHandler handler, int index, Object handlerRef) {
-            this.handler = handler;
-            this.index = index;
-            this.handlerRef = handlerRef;
-        }
-    }
+    // 运行时解析结果（不要使用自定义返回类型以避免 VerifyError）
+    private IRecipeHandler resolvedHandler = null;
+    private int resolvedIndex = -1;
 
     /**
-     * 运行时解析 handler + index：
-     * 1) 先尝试旧版字段（this.handler / this.recipeIndex）
-     * 2) 找不到的话尝试新版字段 this.handlerRef 并从中提取 handler + recipeIndex
+     * 解析并填充 resolvedHandler/resolvedIndex。
+     * 返回 true 表示解析成功（可以使用 resolvedHandler/resolvedIndex）。
      */
-    private HandlerEntry resolveHandlerEntry() {
+    private boolean resolveHandlerAndIndex() {
+        resolvedHandler = null;
+        resolvedIndex = -1;
         try {
             Class<?> cls = this.getClass();
 
-            // 尝试旧版字段：handler + recipeIndex
+            // 1) 尝试旧版字段：handler + recipeIndex
             Field fHandler = findFieldRecursive(cls, "handler");
             Field fIndex = findFieldRecursive(cls, "recipeIndex");
             if (fHandler != null && fIndex != null) {
@@ -81,17 +71,18 @@ public abstract class MixinGuiOverlayButton {
                 Object handlerObj = fHandler.get(this);
                 int idx = fIndex.getInt(this);
                 if (handlerObj instanceof IRecipeHandler) {
-                    return new HandlerEntry((IRecipeHandler) handlerObj, idx, null);
+                    resolvedHandler = (IRecipeHandler) handlerObj;
+                    resolvedIndex = idx;
+                    return true;
                 }
             }
 
-            // 尝试新版字段 handlerRef（并从中提取 inner handler + recipeIndex）
+            // 2) 尝试新版字段 handlerRef 并从中提取 inner handler + recipeIndex
             Field fHandlerRef = findFieldRecursive(cls, "handlerRef");
             if (fHandlerRef != null) {
                 fHandlerRef.setAccessible(true);
                 Object refObj = fHandlerRef.get(this);
                 if (refObj != null) {
-                    // inner field names in RecipeHandlerRef: "handler" and "recipeIndex"
                     Field innerHandler = findFieldRecursive(refObj.getClass(), "handler");
                     Field innerIndex = findFieldRecursive(refObj.getClass(), "recipeIndex");
                     if (innerHandler != null && innerIndex != null) {
@@ -100,16 +91,17 @@ public abstract class MixinGuiOverlayButton {
                         Object handlerObj = innerHandler.get(refObj);
                         int idx = innerIndex.getInt(refObj);
                         if (handlerObj instanceof IRecipeHandler) {
-                            return new HandlerEntry((IRecipeHandler) handlerObj, idx, refObj);
+                            resolvedHandler = (IRecipeHandler) handlerObj;
+                            resolvedIndex = idx;
+                            return true;
                         }
                     }
-                    // 若没有 inner 字段，也可尝试 getter 方法（可按需补充）
                 }
             }
         } catch (Throwable t) {
-            // 忽略反射异常，最终返回 null 表示无法解析
+            // 忽略反射异常，解析失败返回 false
         }
-        return null;
+        return false;
     }
 
     private static Field findFieldRecursive(Class<?> cls, String name) {
@@ -123,7 +115,6 @@ public abstract class MixinGuiOverlayButton {
         }
         return null;
     }
-    // ---------- 结束 运行时兼容封装 ----------
 
     @Inject(method = "handleHotkeys", at = @At("TAIL"), remap = false)
     private void handleHotkeys(GuiContainer gui, int mousex, int mousey, Map<String, String> hotkeys,
@@ -148,10 +139,9 @@ public abstract class MixinGuiOverlayButton {
 
         if (!GuiScreen.isCtrlKeyDown() || !(firstGui instanceof AEBaseGui gui)) return;
 
-        HandlerEntry he = resolveHandlerEntry();
-        if (he == null) return; // 无法取得 handler/index，直接返回（安全失败）
+        if (!resolveHandlerAndIndex()) return; // 解析失败则安全返回
 
-        final List<PositionedStack> ingredients = he.handler.getIngredientStacks(he.index);
+        final List<PositionedStack> ingredients = resolvedHandler.getIngredientStacks(resolvedIndex);
         IItemList<IAEItemStack> list = null;
         if (AE2ThingAPI.instance()
             .terminal()
@@ -219,13 +209,14 @@ public abstract class MixinGuiOverlayButton {
         if (AE2ThingAPI.instance()
             .terminal()
             .isCraftingTerminal(this.firstGui)) {
-            HandlerEntry he = resolveHandlerEntry();
-            if (he == null) return;
+
+            if (!resolveHandlerAndIndex()) return;
+
             ICraftingTerminalAdapter adapter = AE2ThingAPI.instance()
                 .terminal()
                 .getCraftingTerminal()
                 .get(this.firstGui.inventorySlots.getClass());
-            adapter.moveItems(this.firstGui, he.handler, he.index);
+            adapter.moveItems(this.firstGui, resolvedHandler, resolvedIndex);
         }
     }
 
